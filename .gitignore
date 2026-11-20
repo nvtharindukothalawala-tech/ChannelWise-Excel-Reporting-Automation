@@ -1,0 +1,64 @@
+﻿# Python environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Confidential Excel and business data
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.csv
+*.parquet
+*.prof
+
+# Original files and generated reports
+incoming/
+dumps/
+dumps_backup*/
+dump_repair_backup/
+reports/
+backups/
+staging/
+safe_save_integration_test/
+ChannelReports/
+
+# Test reports, experiments, and historical backups
+cluster_before_update*/
+reports_before_repair*/
+formula_repair_test/
+pivot_refresh_test/
+com_stage_output*/
+com_update_output*/
+diagnostic_reports/
+diagnostic_logs/
+quarantine/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.bak
+*.backup
+*.zip
+
+# Local configuration and credentials
+config.json
+config_updated.json
+config_mbr.json
+config_diagnostic.json
+config_original_backup.json
+config/
+.env
+.env.*
+!.env.example
+
+# Machine-specific files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

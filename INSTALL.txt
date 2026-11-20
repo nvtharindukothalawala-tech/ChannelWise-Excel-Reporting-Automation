@@ -1,0 +1,85 @@
+REPORT AUTOMATION - replacing your current folder
+=================================================
+
+BEFORE YOU DELETE ANYTHING
+--------------------------
+The reports\ folder in this zip contains the workbooks as they were when they
+were last sent for optimisation. If you have edited any of them since - most
+likely the Target sheets, where the monthly targets are typed in - those edits
+are NOT in these copies.
+
+So:
+
+  1. Rename your existing folder to ChannelReports_old. Do not delete it.
+  2. Unzip this one in its place.
+  3. For every report where you have newer Target figures, copy YOUR file from
+     ChannelReports_old\reports\ over the one in here.
+  4. Run the audit (below). If it comes back clean, your file is compatible.
+  5. Keep ChannelReports_old for a week before deleting it.
+
+Your dumps are not in this zip. Copy ChannelReports_old\dumps\ across if you
+want to carry on mid-month without re-downloading.
+
+FIRST RUN
+---------
+  python -m pip install openpyxl
+
+  python run_reports.py --list
+  python run_reports.py --group daily --audit
+  python run_reports.py --config config_mbr.json --group mbr --audit
+
+Both audits must say "Audit clean." before you run anything for real.
+
+DAILY
+-----
+  Drop the 2 current-month dumps in incoming\
+  Stock exports (only for the BU revenue reports) in
+      incoming\stock_this_month\  and  incoming\stock_last_month\
+
+  run_daily.bat          (or the two commands it contains)
+
+FIRST WORKING DAY OF A MONTH
+----------------------------
+  Download the 6 full-month dumps as well, then:
+
+  python rename_dumps.py --source incoming
+  python run_reports.py --group daily --no-truncate
+
+  --no-truncate matters at month end: without it a 31-day comparison month is
+  cut to match a 30-day one.
+
+ON REQUEST (the 5 BU brand revenue reports)
+-------------------------------------------
+  python run_reports.py --group on_request
+
+MONTHLY (MBR)
+-------------
+  MBR dumps in incoming\mbr\, the stock export in incoming\mbr\stock\
+
+  run_mbr.bat            (or the two commands it contains)
+
+FOLDERS
+-------
+  reports\          the 8 daily reports
+  reports\bu\       the 5 on-request BU brand revenue reports
+  reports\mbr\      the 5 MBR reports
+
+  BU_Daily_Revenue_Report.xlsx stays in reports\ because it runs daily - only
+  the five BU BRAND revenue reports are on request.
+
+  Backups mirror these folders, e.g. backups\2026-10-02\bu\
+
+WHAT IS IN HERE
+---------------
+  run_reports.py     fills the reports
+  rename_dumps.py    names the downloads by reading their dates
+  cfpatch.py         keeps conditional formatting openpyxl would drop
+  chartpatch.py      keeps charts openpyxl would rewrite
+  check_cf.py        diagnostic: counts formatting rules per report
+  config.json        13 daily + on-request reports
+  config_mbr.json    5 MBR reports
+  README.md          the detail
+
+run_reports.py, rename_dumps.py, cfpatch.py and chartpatch.py must all stay
+in the same folder - run_reports exits with a clear message if one is missing.
+check_cf.py is an optional diagnostic and is not needed to run anything.

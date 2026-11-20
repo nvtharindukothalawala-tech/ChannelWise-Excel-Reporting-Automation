@@ -1,0 +1,12 @@
+{
+  "_comment": "Example configuration only. Replace with your own authorized report definitions.",
+  "paths": {
+    "dumps": "dumps",
+    "reports": "reports",
+    "logs": "logs"
+  },
+  "dump_files": {},
+  "match_fields": {},
+  "brand_keywords": {},
+  "brands": {}
+}
