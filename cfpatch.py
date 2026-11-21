@@ -1,94 +1,143 @@
-"""
-Preserve extended conditional formatting (data bars with custom colours,
-icon sets) that openpyxl silently drops on save.
+﻿"""Preserve extended Excel conditional formatting by worksheet name."""
 
-Excel stores these in two places inside a worksheet's XML:
-  1. an <extLst> at the end of the sheet holding <x14:conditionalFormattings>
-  2. a small <extLst> inside individual <cfRule> elements, linking each rule
-     to its extended definition by GUID
+import os
+import re
+import zipfile
+import xml.etree.ElementTree as ET
 
-openpyxl understands neither, so both vanish when a workbook is re-saved.
-This module snapshots them from the original file before the run and splices
-them back into the saved file afterwards.
+from chartpatch_fixed import _sheet_map
 
-Rules are matched on their `priority` attribute, which is unique within a
-worksheet and preserved by openpyxl. Only cell values change during a run,
-never the formatting, so the snapshot stays valid.
-"""
+MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+X14 = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
 
-import os, re, zipfile
-
-WS_RE     = re.compile(r'xl/worksheets/sheet\d+\.xml$')
-TAIL_RE   = re.compile(r'<extLst>(?:(?!</extLst>).)*?x14:conditionalFormattings.*?</extLst>', re.S)
-RULE_RE   = re.compile(r'<cfRule\b[^>]*/>|<cfRule\b[^>]*>.*?</cfRule>', re.S)
-INLINE_RE = re.compile(r'<extLst>.*?</extLst>', re.S)
-PRIO_RE   = re.compile(r'priority="(\d+)"')
+TAIL_RE = re.compile(
+    r'<extLst\b[^>]*>(?:(?!</extLst>).)*?'
+    r'x14:conditionalFormattings.*?</extLst>',
+    re.S,
+)
+RULE_RE = re.compile(
+    r'<cfRule\b[^>]*(?:/>|>.*?</cfRule>)',
+    re.S,
+)
+INLINE_RE = re.compile(r'<extLst\b[^>]*>.*?</extLst>', re.S)
+PRIO_RE = re.compile(r'priority="(\d+)"')
 
 
 def snapshot(xlsx_path):
-    """Return {sheet_xml_name: {'tail': str, 'by_priority': {prio: extLst}}}."""
-    snap = {}
+    result = {}
+
     with zipfile.ZipFile(xlsx_path) as z:
-        for name in z.namelist():
-            if not WS_RE.search(name):
-                continue
-            xml = z.read(name).decode("utf-8")
-            if "x14:conditionalFormattings" not in xml:
-                continue
+        parts = {
+            name: z.read(name)
+            for name in z.namelist()
+            if not name.endswith("/")
+        }
 
-            m = TAIL_RE.search(xml)
-            tail = m.group(0) if m else ""
+    for sheet_name, sheet_path in _sheet_map(parts).items():
+        xml = parts[sheet_path].decode("utf-8")
 
-            by_priority = {}
-            for rm in RULE_RE.finditer(xml):
-                rule = rm.group(0)
-                ext = INLINE_RE.search(rule)
-                prio = PRIO_RE.search(rule)
-                if ext and prio:
-                    by_priority[prio.group(1)] = ext.group(0)
+        if "x14:conditionalFormattings" not in xml:
+            continue
 
-            if tail or by_priority:
-                snap[name] = {"tail": tail, "by_priority": by_priority}
-    return snap
+        match = TAIL_RE.search(xml)
+        tail = match.group(0) if match else ""
+
+        by_priority = {}
+
+        for rule_match in RULE_RE.finditer(xml):
+            rule = rule_match.group(0)
+            ext = INLINE_RE.search(rule)
+            priority = PRIO_RE.search(rule)
+
+            if ext and priority:
+                by_priority[priority.group(1)] = ext.group(0)
+
+        if tail or by_priority:
+            result[sheet_name] = {
+                "tail": tail,
+                "by_priority": by_priority,
+            }
+
+    return result
 
 
 def _restore_sheet(xml, data):
     links = data["by_priority"]
 
-    def fix_rule(rm):
-        rule = rm.group(0)
-        if "<extLst>" in rule:
+    def fix_rule(match):
+        rule = match.group(0)
+
+        if "<extLst" in rule:
             return rule
-        prio = PRIO_RE.search(rule)
-        if not prio or prio.group(1) not in links:
+
+        priority = PRIO_RE.search(rule)
+
+        if not priority:
             return rule
-        ext = links[prio.group(1)]
+
+        ext = links.get(priority.group(1))
+
+        if not ext:
+            return rule
+
         if rule.endswith("/>"):
             return rule[:-2] + ">" + ext + "</cfRule>"
-        return rule[: -len("</cfRule>")] + ext + "</cfRule>"
+
+        return rule[:-len("</cfRule>")] + ext + "</cfRule>"
 
     xml = RULE_RE.sub(fix_rule, xml)
 
     if data["tail"] and "x14:conditionalFormattings" not in xml:
-        xml = xml.replace("</worksheet>", data["tail"] + "</worksheet>")
+        # Insert the extension list at the end of the worksheet.
+        xml = xml.replace(
+            "</worksheet>",
+            data["tail"] + "</worksheet>",
+        )
+
     return xml
 
 
 def restore(xlsx_path, snap):
-    """Rewrite xlsx_path with the snapshotted formatting spliced back in."""
     if not snap:
         return 0
-    tmp = xlsx_path + ".cfpatch"
+
+    with zipfile.ZipFile(xlsx_path) as z:
+        parts = {
+            name: z.read(name)
+            for name in z.namelist()
+            if not name.endswith("/")
+        }
+
+    sheet_map = _sheet_map(parts)
     patched = 0
-    with zipfile.ZipFile(xlsx_path) as zin, \
-         zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            blob = zin.read(item.filename)
-            if item.filename in snap:
-                xml = blob.decode("utf-8")
-                if "x14:conditionalFormattings" not in xml:
-                    blob = _restore_sheet(xml, snap[item.filename]).encode("utf-8")
-                    patched += 1
-            zout.writestr(item, blob)
-    os.replace(tmp, xlsx_path)
+
+    for sheet_name, data in snap.items():
+        sheet_path = sheet_map.get(sheet_name)
+
+        if not sheet_path:
+            raise ValueError(
+                f"Worksheet missing during CF restore: {sheet_name}"
+            )
+
+        xml = parts[sheet_path].decode("utf-8")
+
+        if "x14:conditionalFormattings" in xml:
+            continue
+
+        updated = _restore_sheet(xml, data)
+
+        if updated != xml:
+            # Validate XML before writing.
+            ET.fromstring(updated.encode("utf-8"))
+            parts[sheet_path] = updated.encode("utf-8")
+            patched += 1
+
+    temp = xlsx_path + ".cfpatch_fixed"
+
+    with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, blob in parts.items():
+            z.writestr(name, blob)
+
+    os.replace(temp, xlsx_path)
+
     return patched

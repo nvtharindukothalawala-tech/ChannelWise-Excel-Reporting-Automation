@@ -62,3 +62,55 @@ config/
 Thumbs.db
 .vscode/
 .idea/
+
+# Historical Python backups
+*_backup.py
+*_backup_*.py
+*_before_*.py
+*_original_backup.py
+
+# Temporary diagnostic scripts
+audit_cluster_trackers.py
+check_cf.py
+diagnose_trackers.py
+profile_trackers.py
+patch_excel_com_v6.py
+verify_stage_v3.py
+test_excel_*.py
+
+# Experimental Excel COM scripts
+excel_com_tracker_v*.py
+excel_com_writer*.py
+
+# Temporary report runners
+run_reports_diagnostic.py
+run_reports_original_backup.py
+
+# Isolated chart preservation tests
+chart_patch_test_v*/
+# Additional isolated test environments
+final_validation_test/
+nov21_save_test/
+drawing_fix_test/
+verification_backup_*/
+chart_patch_test_v*/
+
+# Temporary testing scripts
+run_reports_chart_test.py
+run_reports_final_test.py
+step48_formula_check.py
+prepare_nov21_dumps.py
+
+# Temporary test notes and results
+step*_results.txt
+step*_code.txt
+
+# Temporary Excel files
+~$*
+*.xlsx.tmp
+
+# Local project archives
+_archive/
+archive/
+
+production_validation_test/

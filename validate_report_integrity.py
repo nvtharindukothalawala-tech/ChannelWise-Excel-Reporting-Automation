@@ -310,7 +310,7 @@ def validate(report_path, backup_path, config_path, month,
     sales_config = report_config["sheets"]["sales_current_month"]
     returns_config = report_config["sheets"]["returns_current_month"]
 
-    dump_folder = ROOT / config["paths"]["dumps"]
+    dump_folder = config_path.parent / config["paths"]["dumps"]
 
     dump_names = config.get("dump_files", {})
 

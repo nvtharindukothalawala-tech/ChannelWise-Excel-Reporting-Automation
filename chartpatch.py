@@ -1,135 +1,201 @@
-"""
-Preserve charts that openpyxl deletes when a workbook is re-saved.
+﻿"""Preserve original Excel charts and drawings across openpyxl saves.
 
-Excel keeps a chart in several pieces:
-  xl/charts/chartN.xml        the chart itself (plus style/colors parts)
-  xl/drawings/drawingN.xml    where it sits on the sheet
-  the sheet's .rels           links the sheet to the drawing
-  <drawing r:id="..."/>       one element inside the worksheet XML
-  [Content_Types].xml         declares each part
-
-openpyxl rewrites the chart and drawing parts from its own simplified model
-and drops the style and colour parts altogether, so charts survive but lose
-their formatting. This module snapshots the original pieces and puts them
-back afterwards, replacing whatever openpyxl produced.
-
-Charts point at their data with formulas such as SalesRepItem!$B$2:$B$40,
-so they keep working as long as the sheet layout does not move. Only cell
-values change during a run, so the snapshot stays valid.
+Worksheets are matched by their actual names, not their XML part numbers.
+Original drawing parts and relationships are restored after openpyxl saves.
 """
 
-import os, re, shutil, zipfile
+import os
+import posixpath
+import re
+import zipfile
+import xml.etree.ElementTree as ET
 
 CHART_PART = re.compile(r"^xl/(charts|drawings)/")
-DRAW_REL = re.compile(
-    r'<Relationship[^>]*Type="[^"]*/drawing"[^>]*/>')
-DRAW_EL = re.compile(r'<drawing\b[^>]*r:id="[^"]+"[^>]*/>')
-# <drawing> must sit after headerFooter and before these, per the schema
-TAIL_TAGS = ("<tableParts", "<extLst", "</worksheet>")
+
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+ET.register_namespace("", MAIN_NS)
+ET.register_namespace("r", DOC_REL_NS)
 
 
-def snapshot(xlsx_path):
-    """Collect every chart-related piece of the workbook."""
-    snap = {"parts": {}, "overrides": [], "sheets": {}}
-    with zipfile.ZipFile(xlsx_path) as z:
-        ct = z.read("[Content_Types].xml").decode("utf-8")
-        for m in re.finditer(r'<Override PartName="([^"]+)"[^>]*/>', ct):
-            part = m.group(1).lstrip("/")
-            if CHART_PART.match(part):
-                snap["overrides"].append(m.group(0))
-
-        for name in z.namelist():
-            if name.endswith("/"):
-                continue
-            if CHART_PART.match(name):
-                snap["parts"][name] = z.read(name)
-
-        for name in z.namelist():
-            m = re.match(r"xl/worksheets/(sheet\d+\.xml)$", name)
-            if not m:
-                continue
-            xml = z.read(name).decode("utf-8")
-            el = DRAW_EL.search(xml)
-            if not el:
-                continue
-            relpath = f"xl/worksheets/_rels/{m.group(1)}.rels"
-            rels = z.read(relpath).decode("utf-8") if relpath in z.namelist() else ""
-            keep = DRAW_REL.findall(rels)
-            if keep:
-                snap["sheets"][name] = {"rel": keep[0], "relpath": relpath}
-    return snap
+def _part_path(base, target):
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(base), target))
 
 
-def _free_rid(rels_xml):
-    used = {int(x) for x in re.findall(r'Id="rId(\d+)"', rels_xml)}
+def _relationships(data):
+    if not data:
+        return ET.Element(f"{{{PKG_REL_NS}}}Relationships")
+    return ET.fromstring(data)
+
+
+def _sheet_map(parts):
+    """Return worksheet names mapped to their XML part paths."""
+    workbook = ET.fromstring(parts["xl/workbook.xml"])
+    rels = _relationships(parts["xl/_rels/workbook.xml.rels"])
+
+    targets = {
+        rel.get("Id"): _part_path("xl/workbook.xml", rel.get("Target"))
+        for rel in rels
+    }
+
+    result = {}
+    for sheet in workbook.findall(f".//{{{MAIN_NS}}}sheet"):
+        name = sheet.get("name")
+        rid = sheet.get(f"{{{DOC_REL_NS}}}id")
+        if rid in targets:
+            result[name] = targets[rid]
+    return result
+
+
+def _rels_path(sheet_path):
+    directory, filename = posixpath.split(sheet_path)
+    return f"{directory}/_rels/{filename}.rels"
+
+
+def _next_rid(rels):
+    used = {rel.get("Id") for rel in rels}
     n = 1
-    while n in used:
+    while f"rId{n}" in used:
         n += 1
     return f"rId{n}"
 
 
-def _insert_drawing(xml, rid):
-    if DRAW_EL.search(xml):
-        return xml
-    # the r: prefix must be declared on the element itself, because openpyxl
-    # does not always put xmlns:r on the worksheet root
-    el = ('<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument'
-          f'/2006/relationships" r:id="{rid}"/>')
-    for tag in TAIL_TAGS:
-        i = xml.find(tag)
-        if i != -1:
-            return xml[:i] + el + xml[i:]
-    return xml
+def snapshot(xlsx_path):
+    snap = {"parts": {}, "overrides": {}, "sheets": {}}
+
+    with zipfile.ZipFile(xlsx_path) as z:
+        parts = {name: z.read(name) for name in z.namelist() if not name.endswith("/")}
+
+    for name, data in parts.items():
+        if CHART_PART.match(name):
+            snap["parts"][name] = data
+
+    content_types = ET.fromstring(parts["[Content_Types].xml"])
+    for element in content_types:
+        part_name = element.get("PartName", "").lstrip("/")
+        if CHART_PART.match(part_name):
+            snap["overrides"][part_name] = element.get("ContentType")
+
+    for sheet_name, sheet_path in _sheet_map(parts).items():
+        sheet_xml = ET.fromstring(parts[sheet_path])
+        drawing = sheet_xml.find(f"{{{MAIN_NS}}}drawing")
+
+        if drawing is None:
+            continue
+
+        drawing_rid = drawing.get(f"{{{DOC_REL_NS}}}id")
+        relpath = _rels_path(sheet_path)
+        rels = _relationships(parts.get(relpath))
+
+        for rel in rels:
+            if rel.get("Id") == drawing_rid and rel.get("Type", "").endswith("/drawing"):
+                snap["sheets"][sheet_name] = {
+                    "target": _part_path(sheet_path, rel.get("Target")),
+                }
+                break
+
+    return snap
 
 
 def restore(xlsx_path, snap):
-    """Put the charts back into a workbook openpyxl has just written."""
     if not snap["parts"]:
         return 0
 
-    tmp = xlsx_path + ".chartpatch"
-    existing = {}
-    with zipfile.ZipFile(xlsx_path) as zin:
-        names = set(zin.namelist())
-        for n in names:
-            existing[n] = zin.read(n)
+    with zipfile.ZipFile(xlsx_path) as z:
+        parts = {name: z.read(name) for name in z.namelist() if not name.endswith("/")}
 
-    # 1. worksheets: re-insert the <drawing> element and its relationship
-    restored = 0
-    for sheet, info in snap["sheets"].items():
-        if sheet not in existing:
-            continue
-        rels_xml = existing.get(info["relpath"], "").decode("utf-8") if info["relpath"] in existing else (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
-        if "/drawing" in rels_xml and DRAW_REL.search(rels_xml):
-            rid = re.search(r'Id="([^"]+)"', DRAW_REL.search(rels_xml).group(0)).group(1)
-        else:
-            rid = _free_rid(rels_xml)
-            rel = re.sub(r'Id="[^"]+"', f'Id="{rid}"', info["rel"], count=1)
-            rels_xml = rels_xml.replace("</Relationships>", rel + "</Relationships>")
-        existing[info["relpath"]] = rels_xml.encode("utf-8")
+    sheets = _sheet_map(parts)
 
-        xml = existing[sheet].decode("utf-8")
-        new = _insert_drawing(xml, rid)
-        if new != xml:
-            existing[sheet] = new.encode("utf-8")
+    for sheet_name, sheet_path in sheets.items():
+        sheet_root = ET.fromstring(parts[sheet_path])
+        relpath = _rels_path(sheet_path)
+        rels_root = _relationships(parts.get(relpath))
 
-    # 2. the chart and drawing parts themselves, replacing openpyxl's versions
-    for name, blob in snap["parts"].items():
-        existing[name] = blob
-        restored += 1
+        original = snap["sheets"].get(sheet_name)
 
-    # 3. content types
-    ct = existing["[Content_Types].xml"].decode("utf-8")
-    for ov in snap["overrides"]:
-        part = re.search(r'PartName="([^"]+)"', ov).group(1)
-        if f'PartName="{part}"' not in ct:
-            ct = ct.replace("</Types>", ov + "</Types>")
-    existing["[Content_Types].xml"] = ct.encode("utf-8")
+        # Remove existing drawing relationships from this worksheet.
+        for rel in list(rels_root):
+            if rel.get("Type", "").endswith("/drawing"):
+                rels_root.remove(rel)
 
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zout:
-        for name, blob in existing.items():
-            zout.writestr(name, blob)
-    os.replace(tmp, xlsx_path)
-    return restored
+        # Remove existing drawing elements.
+        for drawing in list(sheet_root.findall(f"{{{MAIN_NS}}}drawing")):
+            sheet_root.remove(drawing)
+
+        if original:
+            rid = _next_rid(rels_root)
+
+            ET.SubElement(
+                rels_root,
+                f"{{{PKG_REL_NS}}}Relationship",
+                {
+                    "Type": DOC_REL_NS + "/drawing",
+                    "Target": "/" + original["target"],
+                    "Id": rid,
+                },
+            )
+
+            drawing = ET.Element(
+                f"{{{MAIN_NS}}}drawing",
+                {f"{{{DOC_REL_NS}}}id": rid},
+            )
+
+            # Insert before extension lists and table parts.
+            children = list(sheet_root)
+            index = len(children)
+
+            for i, child in enumerate(children):
+                local = child.tag.split("}")[-1]
+                if local in ("tableParts", "extLst"):
+                    index = i
+                    break
+
+            sheet_root.insert(index, drawing)
+
+        parts[sheet_path] = ET.tostring(
+            sheet_root, encoding="utf-8", xml_declaration=True
+        )
+
+        parts[relpath] = ET.tostring(
+            rels_root, encoding="utf-8", xml_declaration=True
+        )
+
+    # Restore original chart and drawing components.
+    for name in list(parts):
+        if CHART_PART.match(name):
+            del parts[name]
+
+    parts.update(snap["parts"])
+
+    # Restore content-type declarations.
+    ct_root = ET.fromstring(parts["[Content_Types].xml"])
+    for element in list(ct_root):
+        if CHART_PART.match(element.get("PartName", "").lstrip("/")):
+            ct_root.remove(element)
+
+    ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+    for part_name, content_type in snap["overrides"].items():
+        ET.SubElement(
+            ct_root,
+            f"{{{ct_ns}}}Override",
+            {"PartName": "/" + part_name, "ContentType": content_type},
+        )
+
+    parts["[Content_Types].xml"] = ET.tostring(
+        ct_root, encoding="utf-8", xml_declaration=True
+    )
+
+    temp = xlsx_path + ".chartpatch_test"
+
+    with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+
+    os.replace(temp, xlsx_path)
+
+    return len(snap["parts"])
