@@ -5,7 +5,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
-from chartpatch_fixed import _sheet_map
+from chartpatch import _sheet_map
 
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 X14 = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
@@ -141,3 +141,4 @@ def restore(xlsx_path, snap):
     os.replace(temp, xlsx_path)
 
     return patched
+
